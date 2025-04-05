@@ -2,9 +2,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import plotly.express as px
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
-import plotly.express as px
+from statsmodels.tsa.exponential_smoothing.ets import ETSModel
+from scipy.stats import jarque_bera
+from sklearn.metrics import mean_squared_error
+import warnings
+warnings.filterwarnings("ignore")
+
 
 # Configuração da página
 st.set_page_config(page_title="Análise de Emissões CO2e", layout="wide")
@@ -32,18 +39,77 @@ Esta aplicação analisa as séries temporais de emissões de gases de efeito es
 st.sidebar.header('Configurações')
 setor = st.sidebar.selectbox('Selecione o setor:', ['total', 'industria', 'residuos', 'energia', 'agropecuaria', 'mutf'])
 anos_previsao = st.sidebar.slider('Anos para previsão:', 1, 10, 5)
+treino_size_percent = st.sidebar.slider('Percentual de dados para treino:', 50, 90, 80)
+
+# Configurações dos modelos ETS
+modelos = {
+    'AA': ('add', 'add', False),    # Tendência aditiva, erro aditivo
+    'MA': ('mul', 'add', False),    # Tendência aditiva, erro multiplicativo
+    'MM': ('mul', 'mul', False),    # Tendência multiplicativa, erro multiplicativo
+    'AAd': ('add', 'add', True),    # Tendência aditiva amortecida, erro aditivo
+    'MAd': ('mul', 'add', True),    # Tendência aditiva amortecida, erro multiplicativo
+    'MMd': ('mul', 'mul', True)     # Tendência multiplicativa amortecida, erro multiplicativo
+}
+
+# Função para análise ETS
+def melhor_ets(serie, treino, teste, modelos, titulo):
+    melhor_modelo = None
+    menor_aic = float('inf')
+    menor_bic = float('inf')
+    previsoes_dict = {}
+
+    print(f"\n{titulo}")
+    for modelo_nome, (error_type, trend_type, damped) in modelos.items():
+        try:
+            modelo = ETSModel(
+                treino,
+                error=error_type,
+                trend=trend_type,
+                damped_trend=damped,
+                seasonal=None
+            )
+            fitted_model = modelo.fit()
+
+            param_names = fitted_model.param_names
+            param_values = fitted_model.params
+            params_dict = dict(zip(param_names, param_values))
+
+            alpha = params_dict.get('smoothing_level', np.nan)
+            beta = params_dict.get('smoothing_trend', np.nan)
+            phi = params_dict.get('damping_trend', np.nan) if damped else np.nan
+
+            aic = fitted_model.aic
+            bic = fitted_model.bic
+            residuos = fitted_model.resid
+            jb_stat, jb_pvalue = jarque_bera(residuos)
+
+            previsoes = fitted_model.forecast(steps=len(teste))
+            rmse = np.sqrt(np.mean((teste - previsoes) ** 2))
+            mae = np.mean(np.abs(teste - previsoes))
+            mape = np.mean(np.abs((teste - previsoes) / teste)) * 100
+
+            if aic < menor_aic and jb_pvalue > 0:
+                melhor_modelo = fitted_model
+                menor_aic = aic
+                menor_bic = bic
+
+            previsoes_dict[modelo_nome] = previsoes
+
+            st.write(f"Modelo: {modelo_nome}, alpha: {alpha:.4f}, beta: {beta:.4f}, phi: {phi:.4f}, "
+                     f"AIC: {aic:.2f}, BIC: {bic:.2f}, JB p-value: {jb_pvalue:.4f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}, MAPE: {mape:.2f}%")
+
+        except Exception as e:
+            st.error(f"Erro no modelo {modelo_nome}: {e}")
+
+    return melhor_modelo, previsoes_dict
 
 # Função para análise ARIMA
 def analisar_arima(serie, anos_previsao):
-    # Treinar modelo ARIMA
     model = ARIMA(serie, order=(1,1,1))
     model_fit = model.fit()
-    
-    # Previsão
     forecast = model_fit.get_forecast(steps=anos_previsao)
     forecast_mean = forecast.predicted_mean
-    conf_int = forecast.conf_int()
-    
+    conf_int = forecast.conf_int(alpha=0.05)  # Intervalo de confiança de 95%
     return forecast_mean, conf_int, model_fit
 
 # Visualização dos dados
@@ -51,15 +117,21 @@ st.header(f'Série Temporal - {setor.upper()}')
 fig = px.line(df, x='ano', y=setor, title=f'Emissões de CO2e - {setor.upper()}')
 st.plotly_chart(fig, use_container_width=True)
 
-# Análise ARIMA
-st.header('Análise e Previsão ARIMA')
+# Divisão treino/teste
+serie = df[setor].values
+n = len(serie)
+treino_size = int(n * (treino_size_percent / 100))
+treino, teste = serie[:treino_size], serie[treino_size:]
 
-# Gráficos ACF e PACF
-st.subheader('Autocorrelação (ACF e PACF)')
+# Análise ARIMA e ETS
+st.header('Análise e Previsão: ARIMA vs ETS')
+
+# Gráficos ACF e PACF para ARIMA
+st.subheader('Autocorrelação (ACF e PACF) - ARIMA')
 col1, col2 = st.columns(2)
 with col1:
     fig, ax = plt.subplots()
-    plot_acf(df[setor], ax=ax)
+    plot_acf(df[setor], ax=ax)    
     st.pyplot(fig)
 with col2:
     fig, ax = plt.subplots()
@@ -67,45 +139,84 @@ with col2:
     st.pyplot(fig)
 
 # Modelagem e previsão
-try:
-    forecast_mean, conf_int, model_fit = analisar_arima(df[setor], anos_previsao)
-    
-    # Resultados do modelo
-    st.subheader('Resultados do Modelo ARIMA')
-    st.text(model_fit.summary())
-    
-    # Gráfico de previsão
-    st.subheader(f'Previsão para os próximos {anos_previsao} anos')
-    
-    # Criar DataFrame para visualização
-    ultimo_ano = df['ano'].iloc[-1]
-    anos_futuros = list(range(ultimo_ano + 1, ultimo_ano + 1 + anos_previsao))
-    
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(df['ano'], df[setor], label='Dados históricos')
-    ax.plot(anos_futuros, forecast_mean, label='Previsão', color='red')
-    ax.fill_between(anos_futuros, 
-                   conf_int.iloc[:, 0], 
-                   conf_int.iloc[:, 1], 
-                   color='pink', alpha=0.3, label='Intervalo de confiança')
-    ax.set_title(f'Previsão de Emissões para {setor.upper()}')
-    ax.set_xlabel('Ano')
-    ax.set_ylabel('Emissões CO2e')
-    ax.legend()
-    st.pyplot(fig)
-    
-    # Mostrar valores previstos
-    st.subheader('Valores Previstos')
-    prev_df = pd.DataFrame({
-        'Ano': anos_futuros,
-        'Previsão': forecast_mean,
-        'Limite Inferior': conf_int.iloc[:, 0],
-        'Limite Superior': conf_int.iloc[:, 1]
-    })
-    st.dataframe(prev_df.style.format("{:,.0f}"))
-    
-except Exception as e:
-    st.error(f"Erro ao ajustar modelo ARIMA: {str(e)}")
+col_arima, col_ets = st.columns(2)
+
+with col_arima:
+    st.subheader('ARIMA')
+    try:
+        forecast_mean, conf_int, model_fit = analisar_arima(treino, anos_previsao)
+        
+        st.text(model_fit.summary())
+        
+        ultimo_ano = df['ano'].iloc[treino_size - 1]
+        anos_futuros = list(range(ultimo_ano + 1, ultimo_ano + 1 + anos_previsao))
+        
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.plot(df['ano'][:treino_size], treino, label='Treino')
+        ax.plot(df['ano'][treino_size:], teste, label='Teste', color='green')
+        ax.plot(anos_futuros, forecast_mean, label='Previsão', color='red')
+        ax.fill_between(anos_futuros, conf_int[:, 0], conf_int[:, 1], 
+                       color='pink', alpha=0.3, label='Intervalo de confiança')
+        ax.set_title(f'Previsão ARIMA - {setor.upper()}')
+        ax.set_xlabel('Ano')
+        ax.set_ylabel('Emissões CO2e')
+        ax.grid(True)
+        ax.legend()
+        st.pyplot(fig)
+        
+        prev_df = pd.DataFrame({
+            'Ano': anos_futuros,
+            'Previsão': forecast_mean,
+            'Limite Inferior': conf_int[:, 0],
+            'Limite Superior': conf_int[:, 1]
+        })
+        st.dataframe(prev_df.style.format("{:,.0f}"))
+        
+        rmse_arima = np.sqrt(mean_squared_error(teste, model_fit.forecast(steps=len(teste))))
+        st.write(f"RMSE (teste): {rmse_arima:.2f}")
+        
+    except Exception as e:
+        st.error(f"Erro ao ajustar modelo ARIMA: {str(e)}")
+
+# Na seção ETS (dentro do bloco with col_ets:), substitua o código de previsão por:
+
+with col_ets:
+    st.subheader('ETS')
+    try:
+        melhor_modelo, previsoes_dict = melhor_ets(serie, treino, teste, modelos, setor)
+        
+        if melhor_modelo:
+            st.write(f"Melhor modelo: AIC = {melhor_modelo.aic:.2f}, BIC = {melhor_modelo.bic:.2f}")
+            
+            ultimo_ano = df['ano'].iloc[treino_size - 1]
+            anos_futuros = list(range(ultimo_ano + 1, ultimo_ano + 1 + anos_previsao))
+            previsao_futura = melhor_modelo.forecast(steps=anos_previsao)
+            
+            fig, ax = plt.subplots(figsize=(8, 5))
+            ax.plot(df['ano'][:treino_size], treino, label='Treino')
+            ax.plot(df['ano'][treino_size:], teste, label='Teste', color='green')
+            ax.plot(anos_futuros, previsao_futura, label='Previsão', color='blue')
+            ax.set_title(f'Previsão ETS - {setor.upper()}')
+            ax.set_xlabel('Ano')
+            ax.set_ylabel('Emissões CO2e')
+            ax.grid(True)
+            ax.legend()
+            st.pyplot(fig)
+            
+            prev_df = pd.DataFrame({
+                'Ano': anos_futuros,
+                'Previsão': previsao_futura
+            })
+            st.dataframe(prev_df.style.format("{:,.0f}"))
+            
+            rmse_ets = np.sqrt(mean_squared_error(teste, melhor_modelo.forecast(steps=len(teste))))
+            st.write(f"RMSE (teste): {rmse_ets:.2f}")
+            
+    except Exception as e:
+        st.error(f"Erro ao ajustar modelo ETS: {str(e)}")
+
+# Na seção ETS (dentro do bloco with col_ets:), substitua o código de previsão por:
+
 
 # Comparação entre setores
 st.header('Comparação entre Setores')
@@ -119,6 +230,35 @@ if setores_comparacao:
     fig = px.line(df, x='ano', y=setores_comparacao, 
                  title='Comparação entre Setores',
                  labels={'value': 'Emissões CO2e', 'variable': 'Setor'})
+    st.plotly_chart(fig, use_container_width=True)
+if setores_comparacao:
+    fig = px.line(df, x='ano', y=setores_comparacao, 
+                 title='Comparação entre Setores',
+                 labels={'value': 'Emissões CO2e', 'variable': 'Setor'})
+    
+    fig.update_layout(
+        plot_bgcolor='white',
+        xaxis=dict(
+            showgrid=True, 
+            gridcolor='lightgray',
+            gridwidth=0.5
+        ),
+        yaxis=dict(
+            showgrid=True, 
+            gridcolor='lightgray',
+            gridwidth=0.5
+        ),
+        hovermode='x unified',
+        legend=dict(
+            title_text='Setores',
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        )
+    )
+    
     st.plotly_chart(fig, use_container_width=True)
 
 # Rodapé
