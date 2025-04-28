@@ -41,6 +41,9 @@ anos_previsao = st.sidebar.slider('Anos para previsão:', 1, 10, 5)
 treino_size_percent = st.sidebar.slider('Percentual de dados para treino (aplicável apenas ao teste 80/20):', 50, 90, 80)
 teste_metodo = st.sidebar.selectbox('Método de teste:', ['Divisão 80/20', 'Walk-Forward Testing'])
 
+# Informar o método de teste selecionado
+st.sidebar.markdown(f"**Método selecionado**: {teste_metodo}")
+
 # Configurações dos modelos ETS
 modelos = {
     'AA': ('add', 'add', False),    # Tendência aditiva, erro aditivo
@@ -58,7 +61,7 @@ def melhor_ets(serie, treino, teste, modelos, titulo):
     menor_bic = float('inf')
     previsoes_dict = {}
 
-    print(f"\n{titulo}")
+    st.write(f"\n**{titulo}**")
     for modelo_nome, (error_type, trend_type, damped) in modelos.items():
         try:
             modelo = ETSModel(
@@ -95,11 +98,11 @@ def melhor_ets(serie, treino, teste, modelos, titulo):
 
             previsoes_dict[modelo_nome] = previsoes
 
-            st.write(f"Modelo: {modelo_nome}, alpha: {alpha:.4f}, beta: {beta:.4f}, phi: {phi:.4f}, "
-                     f"AIC: {aic:.2f}, BIC: {bic:.2f}, JB p-value: {jb_pvalue:.4f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}, MAPE: {mape:.2f}%")
+            # st.write(f"Modelo: {modelo_nome}, alpha: {alpha:.4f}, beta: {beta:.4f}, phi: {phi:.4f}, "
+            #         f"AIC: {aic:.2f}, BIC: {bic:.2f}, JB p-value: {jb_pvalue:.4f}, RMSE: {rmse:.2f}, MAE: {mae:.2f}, MAPE: {mape:.2f}%")
 
         except Exception as e:
-            st.error(f"Erro no modelo {modelo_nome}: {e}")
+            st.error(f"Erro no modelo {modelo_nome}: {e}. Isso pode ocorrer devido à alta variabilidade nos dados do setor {setor}.")
 
     return melhor_modelo, previsoes_dict
 
@@ -145,6 +148,7 @@ def analisar_arima(serie, anos_previsao):
 def analisar_arima_walk_forward(serie, initial_train_size, step_size, anos_previsao):
     rmse_list = []
     previsoes_futuras = []
+    conf_int = None
     n = len(serie)
     
     for i in range(initial_train_size, n, step_size):
@@ -164,7 +168,7 @@ def analisar_arima_walk_forward(serie, initial_train_size, step_size, anos_previ
                 conf_int = forecast.conf_int(alpha=0.05)
         
         except Exception as e:
-            st.error(f"Erro no ARIMA na janela {i}: {str(e)}")
+            st.error(f"Erro no ARIMA na janela {i}: {str(e)}. Isso pode ocorrer devido à alta variabilidade nos dados do setor {setor}.")
     
     return previsoes_futuras, conf_int, np.mean(rmse_list)
 
@@ -182,8 +186,10 @@ step_size = 1  # Passo de 1 ano para Walk-Forward
 if teste_metodo == 'Divisão 80/20':
     treino_size = int(n * (treino_size_percent / 100))
     treino, teste = serie[:treino_size], serie[treino_size:]
+    st.markdown(f"**Método de teste**: Divisão 80/20 (Treino: {treino_size} anos, Teste: {n - treino_size} anos)")
 else:
     treino, teste = serie[:initial_train_size], serie[initial_train_size:]
+    st.markdown(f"**Método de teste**: Walk-Forward Testing (Tamanho inicial de treino: {initial_train_size} anos, Passo: {step_size} ano)")
 
 # Análise ARIMA e ETS
 st.header('Análise e Previsão: ARIMA vs ETS')
@@ -238,7 +244,7 @@ with col_arima:
         st.write(f"RMSE médio (teste): {rmse_arima:.2f}")
         
     except Exception as e:
-        st.error(f"Erro ao ajustar modelo ARIMA: {str(e)}")
+        st.error(f"Erro ao ajustar modelo ARIMA: {str(e)}. Considere verificar os dados do setor {setor} ou ajustar os parâmetros do modelo.")
 
 with col_ets:
     st.subheader('ETS')
@@ -275,7 +281,7 @@ with col_ets:
             st.write(f"RMSE médio (teste): {rmse_ets:.2f}")
             
     except Exception as e:
-        st.error(f"Erro ao ajustar modelo ETS: {str(e)}")
+        st.error(f"Erro ao ajustar modelo ETS: {str(e)}. Considere verificar os dados do setor {setor} ou ajustar os parâmetros do modelo.")
 
 # Comparação entre setores
 st.header('Comparação entre Setores')
